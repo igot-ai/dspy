@@ -81,7 +81,7 @@ class PlanAndExecute(Module):
         )
 
         # We need to initialize signatures dynamically with rules to support streaming
-        self.planning_signature, self.execution_signature, self.extraction_signature, self.replanning_signature = self._create_signatures_with_rules("")
+        self.planning_signature, self.execution_signature, self.extraction_signature, self.replanning_signature = self._create_signatures()
 
         # Initialize sub-modules
         self.planner = dspy.ChainOfThought(self.planning_signature)
@@ -91,7 +91,7 @@ class PlanAndExecute(Module):
 
 
 
-    def _build_planning_instructions(self, inputs: str, outputs: str, rules: str = "") -> str:
+    def _build_planning_instructions(self, inputs: str, outputs: str) -> str:
         """Build instructions for the planning phase."""
         base_instr = [f"{self.signature.instructions}\n"] if self.signature.instructions else []
         
@@ -102,19 +102,9 @@ class PlanAndExecute(Module):
             f"Bạn có quyền truy cập vào các công cụ sau:\n{tools_desc}\n",
             f"Tạo một kế hoạch chi tiết từng bước với tối đa {self.max_plan_steps} bước.",
             "Mỗi bước phải cụ thể và có thể thực hiện được, nêu rõ công cụ nào sẽ sử dụng và tại sao.",
-            "Kế hoạch phải logic, tuần tự và toàn diện để hoàn thành nhiệm vụ một cách đầy đủ."
-        ])
-        
-        # Add rules if provided
-        if rules.strip():
-            base_instr.extend([
-                "",
-                "QUY TẮC VÀ RÀNG BUỘC QUAN TRỌNG:",
-                f"{rules.strip()}",
-                "Đảm bảo kế hoạch của bạn tuân thủ nghiêm ngặt các quy tắc và ràng buộc trên."
-            ])
-        
-        base_instr.extend([
+            "Kế hoạch phải logic, tuần tự và toàn diện để hoàn thành nhiệm vụ một cách đầy đủ.",
+            "",
+            "QUAN TRỌNG: Nếu có quy tắc và ràng buộc được cung cấp trong trường 'rules', hãy tuân thủ nghiêm ngặt các quy tắc đó khi tạo kế hoạch.",
             "",
             "QUAN TRỌNG: Xuất kế hoạch dưới dạng mảng JSON trong đó mỗi bước có 'id' (số nguyên bắt đầu từ 1) và 'description' (chuỗi).",
             "Tùy chọn, các bước có thể bao gồm trường 'replan' (boolean) để chỉ ra rằng kế hoạch nên được cập nhật sau khi bước này hoàn thành.",
@@ -161,7 +151,7 @@ class PlanAndExecute(Module):
         
         return "\n".join(base_instr)
 
-    def _build_replanning_instructions(self, inputs: str, outputs: str, rules: str = "") -> str:
+    def _build_replanning_instructions(self, inputs: str, outputs: str) -> str:
         """Build instructions for the replanning phase."""
         base_instr = [f"{self.signature.instructions}\n"] if self.signature.instructions else []
         
@@ -174,19 +164,9 @@ class PlanAndExecute(Module):
             "Kế hoạch ban đầu có một bước được đánh dấu để lên kế hoạch lại, và bước đó đã được thực hiện.",
             "Dựa trên kết quả của bước đó, cập nhật kế hoạch còn lại để kết hợp thông tin mới.",
             "Giữ nguyên các bước đã hoàn thành, nhưng sửa đổi các bước sắp tới dựa trên kết quả mới.",
-            "Đảm bảo kế hoạch cập nhật sẽ hoàn thành hiệu quả công việc còn lại."
-        ])
-        
-        # Add rules if provided
-        if rules.strip():
-            base_instr.extend([
-                "",
-                "QUY TẮC VÀ RÀNG BUỘC QUAN TRỌNG:",
-                f"{rules.strip()}",
-                "Đảm bảo kế hoạch cập nhật của bạn tuân thủ nghiêm ngặt các quy tắc và ràng buộc trên."
-            ])
-        
-        base_instr.extend([
+            "Đảm bảo kế hoạch cập nhật sẽ hoàn thành hiệu quả công việc còn lại.",
+            "",
+            "QUAN TRỌNG: Nếu có quy tắc và ràng buộc được cung cấp trong trường 'rules', hãy tuân thủ nghiêm ngặt các quy tắc đó khi cập nhật kế hoạch.",
             "",
             "QUAN TRỌNG: Xuất kế hoạch cập nhật dưới dạng mảng JSON trong đó mỗi bước có 'id', 'description' và trường 'replan' tùy chọn.",
             "Duy trì cùng một hệ thống đánh số ID cho các bước đã hoàn thành và chỉ định ID mới cho các bước mới/đã sửa đổi.",
@@ -201,13 +181,13 @@ class PlanAndExecute(Module):
         
         return "\n".join(base_instr)
 
-    def _create_signatures_with_rules(self, rules: str = ""):
+    def _create_signatures(self):
         """Create signatures for each phase with optional rules."""
         inputs = ", ".join([f"`{k}`" for k in self.signature.input_fields.keys()])
         outputs = ", ".join([f"`{k}`" for k in self.signature.output_fields.keys()])
 
-        # Build instructions with rules
-        plan_instr = self._build_planning_instructions(inputs, outputs, rules)
+        # Build instructions
+        plan_instr = self._build_planning_instructions(inputs, outputs)
         exec_instr = self._build_execution_instructions(outputs)
         extract_instr = self._build_extraction_instructions(inputs, outputs)
 
@@ -241,7 +221,7 @@ class PlanAndExecute(Module):
         # Create replanning signature if replan is enabled
         replanning_signature = None
         if self.replan_enabled:
-            replan_instr = self._build_replanning_instructions(inputs, outputs, rules)
+            replan_instr = self._build_replanning_instructions(inputs, outputs)
             replanning_signature = (
                 dspy.Signature({
                     **self.signature.input_fields,
@@ -303,18 +283,11 @@ class PlanAndExecute(Module):
     def forward(self, **input_args):
         """Execute the plan-and-execute workflow."""
         max_retries = input_args.pop("max_retries", self.max_retries)
-        # rules = input_args.pop("rules", "")
-
-        # # Create signatures dynamically with rules (empty string if no rules provided)
-        # planning_signature, execution_signature, extraction_signature, replanning_signature = self._create_signatures_with_rules(rules)
-        # self.planner = dspy.ChainOfThought(planning_signature)
-        # self.executor = dspy.ChainOfThought(execution_signature)
-        # self.extractor = dspy.ChainOfThought(extraction_signature)
-        # self.replanner = dspy.ChainOfThought(replanning_signature) if self.replan_enabled and replanning_signature else None
+        rules = input_args.pop("rules", "")
 
         # Phase 1: Planning
         try:
-            plan_result = self._call_with_potential_context_truncation(self.planner, {}, **input_args)
+            plan_result = self._call_with_potential_context_truncation(self.planner, {"rules": rules}, **input_args)
             plan = plan_result.plan
         except Exception as err:
             logger.error(f"Planning phase failed: {_fmt_exc(err)}")
@@ -413,6 +386,7 @@ class PlanAndExecute(Module):
                             replan_result = self._call_with_potential_context_truncation(
                                 self.replanner,
                                 {
+                                    "rules": rules,
                                     "original_plan": json.dumps(current_steps, indent=2),
                                     "execution_history": self._format_execution_history(execution_history),
                                     "replan_step_result": str(tool_result)
