@@ -80,6 +80,15 @@ class PlanAndExecute(Module):
             desc="Sử dụng khi bước này có thể được hoàn thành chỉ thông qua lập luận mà không cần gọi bất kỳ công cụ bên ngoài nào."
         )
 
+        # We need to initialize signatures dynamically with rules to support streaming
+        self.planning_signature, self.execution_signature, self.extraction_signature, self.replanning_signature = self._create_signatures_with_rules("")
+
+        # Initialize sub-modules
+        self.planner = dspy.ChainOfThought(self.planning_signature)
+        self.executor = dspy.ChainOfThought(self.execution_signature)
+        self.extractor = dspy.ChainOfThought(self.extraction_signature)
+        self.replanner = dspy.ChainOfThought(self.replanning_signature) if self.replan_enabled and self.replanning_signature else None
+
 
 
     def _build_planning_instructions(self, inputs: str, outputs: str, rules: str = "") -> str:
@@ -293,26 +302,24 @@ class PlanAndExecute(Module):
 
     def forward(self, **input_args):
         """Execute the plan-and-execute workflow."""
-        max_plan_steps = input_args.pop("max_plan_steps", self.max_plan_steps)
         max_retries = input_args.pop("max_retries", self.max_retries)
-        rules = input_args.pop("rules", "")
+        # rules = input_args.pop("rules", "")
 
-        # Create signatures dynamically with rules (empty string if no rules provided)
-        planning_signature, execution_signature, extraction_signature, replanning_signature = self._create_signatures_with_rules(rules)
-        planner = dspy.ChainOfThought(planning_signature)
-        executor = dspy.ChainOfThought(execution_signature)
-        extractor = dspy.ChainOfThought(extraction_signature)
-        replanner = dspy.ChainOfThought(replanning_signature) if self.replan_enabled and replanning_signature else None
+        # # Create signatures dynamically with rules (empty string if no rules provided)
+        # planning_signature, execution_signature, extraction_signature, replanning_signature = self._create_signatures_with_rules(rules)
+        # self.planner = dspy.ChainOfThought(planning_signature)
+        # self.executor = dspy.ChainOfThought(execution_signature)
+        # self.extractor = dspy.ChainOfThought(extraction_signature)
+        # self.replanner = dspy.ChainOfThought(replanning_signature) if self.replan_enabled and replanning_signature else None
 
         # Phase 1: Planning
         try:
-            plan_result = self._call_with_potential_context_truncation(planner, {}, **input_args)
+            plan_result = self._call_with_potential_context_truncation(self.planner, {}, **input_args)
             plan = plan_result.plan
         except Exception as err:
             logger.error(f"Planning phase failed: {_fmt_exc(err)}")
-            # Fallback to direct answer if planning fails
             result = self._call_with_potential_context_truncation(
-                extractor, 
+                self.extractor, 
                 {"plan": "Lập kế hoạch thất bại", "execution_history": "Không thực hiện gì"},
                 **input_args
             )
@@ -328,7 +335,7 @@ class PlanAndExecute(Module):
         steps = self._parse_plan_steps(plan)
         if not steps:
             result = self._call_with_potential_context_truncation(
-                extractor,
+                self.extractor,
                 {"plan": plan, "execution_history": "Không có bước hợp lệ nào trong kế hoạch"},
                 **input_args
             )
@@ -358,7 +365,7 @@ class PlanAndExecute(Module):
                 try:
                     # Execute current step
                     exec_result = self._call_with_potential_context_truncation(
-                        executor,
+                        self.executor,
                         {
                             "step_id": step_id,
                             "step_description": step_description,
@@ -404,7 +411,7 @@ class PlanAndExecute(Module):
                         logger.info(f"Step {step_id} marked for replanning, updating plan...")
                         try:
                             replan_result = self._call_with_potential_context_truncation(
-                                replanner,
+                                self.replanner,
                                 {
                                     "original_plan": json.dumps(current_steps, indent=2),
                                     "execution_history": self._format_execution_history(execution_history),
@@ -448,7 +455,7 @@ class PlanAndExecute(Module):
         # Phase 3: Extract final answer
         try:
             final_result = self._call_with_potential_context_truncation(
-                extractor,
+                self.extractor,
                 {
                     "plan": plan,
                     "execution_history": self._format_execution_history(execution_history)
