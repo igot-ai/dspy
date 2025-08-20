@@ -80,67 +80,9 @@ class PlanAndExecute(Module):
             desc="Sử dụng khi bước này có thể được hoàn thành chỉ thông qua lập luận mà không cần gọi bất kỳ công cụ bên ngoài nào."
         )
 
-        # Get input/output field names for instruction formatting
-        inputs = ", ".join([f"`{k}`" for k in signature.input_fields.keys()])
-        outputs = ", ".join([f"`{k}`" for k in signature.output_fields.keys()])
 
-        # Build planning instructions
-        plan_instr = self._build_planning_instructions(inputs, outputs)
-        
-        # Build execution instructions
-        exec_instr = self._build_execution_instructions(outputs)
-        
-        # Build final answer extraction instructions
-        extract_instr = self._build_extraction_instructions(inputs, outputs)
 
-        # Create signatures for each phase
-        self.planning_signature = (
-            dspy.Signature({**signature.input_fields}, plan_instr)
-            .append("plan", dspy.OutputField(desc="A JSON array of plan steps with id and description"), type_=str)
-        )
-
-        self.execution_signature = (
-            dspy.Signature(
-                {**signature.input_fields, "step_id": dspy.InputField(desc="ID of the current step to execute"), 
-                 "step_description": dspy.InputField(desc="Description of the current step to execute"),
-                 "plan": dspy.InputField(desc="The full plan in JSON format"), 
-                 "execution_history": dspy.InputField(desc="History of executed steps and their results")},
-                exec_instr
-            )
-            .append("step_id", dspy.OutputField(desc="ID of the current step to execute"), type_=str)
-            .append("step_reasoning", dspy.OutputField(desc="Reasoning for this execution step"), type_=str)
-            .append("tool_name", dspy.OutputField(desc="Name of the tool to use"), type_=str)
-            .append("tool_args", dspy.OutputField(desc="Arguments for the tool in JSON format"), type_=dict[str, Any])
-        )
-
-        self.extraction_signature = dspy.Signature(
-            {**signature.input_fields, **signature.output_fields, 
-             "plan": dspy.InputField(desc="The executed plan"), 
-             "execution_history": dspy.InputField(desc="Complete execution history")},
-            extract_instr,
-        )
-
-        # Create replanning signature if replan is enabled
-        if self.replan_enabled:
-            replan_instr = self._build_replanning_instructions(inputs, outputs)
-            self.replanning_signature = (
-                dspy.Signature({
-                    **signature.input_fields,
-                    "original_plan": dspy.InputField(desc="The original plan that is being updated"),
-                    "execution_history": dspy.InputField(desc="History of executed steps and their results"),
-                    "replan_step_result": dspy.InputField(desc="Result of the step that triggered replanning")
-                }, replan_instr)
-                .append("updated_plan", dspy.OutputField(desc="Updated plan incorporating new information"), type_=str)
-            )
-
-        # Create the sub-modules
-        self.planner = dspy.ChainOfThought(self.planning_signature)
-        self.executor = dspy.ChainOfThought(self.execution_signature)
-        self.extractor = dspy.ChainOfThought(self.extraction_signature)
-        if self.replan_enabled:
-            self.replanner = dspy.ChainOfThought(self.replanning_signature)
-
-    def _build_planning_instructions(self, inputs: str, outputs: str) -> str:
+    def _build_planning_instructions(self, inputs: str, outputs: str, rules: str = "") -> str:
         """Build instructions for the planning phase."""
         base_instr = [f"{self.signature.instructions}\n"] if self.signature.instructions else []
         
@@ -151,7 +93,19 @@ class PlanAndExecute(Module):
             f"Bạn có quyền truy cập vào các công cụ sau:\n{tools_desc}\n",
             f"Tạo một kế hoạch chi tiết từng bước với tối đa {self.max_plan_steps} bước.",
             "Mỗi bước phải cụ thể và có thể thực hiện được, nêu rõ công cụ nào sẽ sử dụng và tại sao.",
-            "Kế hoạch phải logic, tuần tự và toàn diện để hoàn thành nhiệm vụ một cách đầy đủ.",
+            "Kế hoạch phải logic, tuần tự và toàn diện để hoàn thành nhiệm vụ một cách đầy đủ."
+        ])
+        
+        # Add rules if provided
+        if rules.strip():
+            base_instr.extend([
+                "",
+                "QUY TẮC VÀ RÀNG BUỘC QUAN TRỌNG:",
+                f"{rules.strip()}",
+                "Đảm bảo kế hoạch của bạn tuân thủ nghiêm ngặt các quy tắc và ràng buộc trên."
+            ])
+        
+        base_instr.extend([
             "",
             "QUAN TRỌNG: Xuất kế hoạch dưới dạng mảng JSON trong đó mỗi bước có 'id' (số nguyên bắt đầu từ 1) và 'description' (chuỗi).",
             "Tùy chọn, các bước có thể bao gồm trường 'replan' (boolean) để chỉ ra rằng kế hoạch nên được cập nhật sau khi bước này hoàn thành.",
@@ -198,7 +152,7 @@ class PlanAndExecute(Module):
         
         return "\n".join(base_instr)
 
-    def _build_replanning_instructions(self, inputs: str, outputs: str) -> str:
+    def _build_replanning_instructions(self, inputs: str, outputs: str, rules: str = "") -> str:
         """Build instructions for the replanning phase."""
         base_instr = [f"{self.signature.instructions}\n"] if self.signature.instructions else []
         
@@ -211,7 +165,19 @@ class PlanAndExecute(Module):
             "Kế hoạch ban đầu có một bước được đánh dấu để lên kế hoạch lại, và bước đó đã được thực hiện.",
             "Dựa trên kết quả của bước đó, cập nhật kế hoạch còn lại để kết hợp thông tin mới.",
             "Giữ nguyên các bước đã hoàn thành, nhưng sửa đổi các bước sắp tới dựa trên kết quả mới.",
-            "Đảm bảo kế hoạch cập nhật sẽ hoàn thành hiệu quả công việc còn lại.",
+            "Đảm bảo kế hoạch cập nhật sẽ hoàn thành hiệu quả công việc còn lại."
+        ])
+        
+        # Add rules if provided
+        if rules.strip():
+            base_instr.extend([
+                "",
+                "QUY TẮC VÀ RÀNG BUỘC QUAN TRỌNG:",
+                f"{rules.strip()}",
+                "Đảm bảo kế hoạch cập nhật của bạn tuân thủ nghiêm ngặt các quy tắc và ràng buộc trên."
+            ])
+        
+        base_instr.extend([
             "",
             "QUAN TRỌNG: Xuất kế hoạch cập nhật dưới dạng mảng JSON trong đó mỗi bước có 'id', 'description' và trường 'replan' tùy chọn.",
             "Duy trì cùng một hệ thống đánh số ID cho các bước đã hoàn thành và chỉ định ID mới cho các bước mới/đã sửa đổi.",
@@ -225,6 +191,59 @@ class PlanAndExecute(Module):
         ])
         
         return "\n".join(base_instr)
+
+    def _create_signatures_with_rules(self, rules: str = ""):
+        """Create signatures for each phase with optional rules."""
+        inputs = ", ".join([f"`{k}`" for k in self.signature.input_fields.keys()])
+        outputs = ", ".join([f"`{k}`" for k in self.signature.output_fields.keys()])
+
+        # Build instructions with rules
+        plan_instr = self._build_planning_instructions(inputs, outputs, rules)
+        exec_instr = self._build_execution_instructions(outputs)
+        extract_instr = self._build_extraction_instructions(inputs, outputs)
+
+        # Create signatures for each phase
+        planning_signature = (
+            dspy.Signature({**self.signature.input_fields}, plan_instr)
+            .append("plan", dspy.OutputField(desc="A JSON array of plan steps with id and description"), type_=str)
+        )
+
+        execution_signature = (
+            dspy.Signature(
+                {**self.signature.input_fields, "step_id": dspy.InputField(desc="ID of the current step to execute"), 
+                 "step_description": dspy.InputField(desc="Description of the current step to execute"),
+                 "plan": dspy.InputField(desc="The full plan in JSON format"), 
+                 "execution_history": dspy.InputField(desc="History of executed steps and their results")},
+                exec_instr
+            )
+            .append("step_id", dspy.OutputField(desc="ID of the current step to execute"), type_=str)
+            .append("step_reasoning", dspy.OutputField(desc="Reasoning for this execution step"), type_=str)
+            .append("tool_name", dspy.OutputField(desc="Name of the tool to use"), type_=str)
+            .append("tool_args", dspy.OutputField(desc="Arguments for the tool in JSON format"), type_=dict[str, Any])
+        )
+
+        extraction_signature = dspy.Signature(
+            {**self.signature.input_fields, **self.signature.output_fields, 
+             "plan": dspy.InputField(desc="The executed plan"), 
+             "execution_history": dspy.InputField(desc="Complete execution history")},
+            extract_instr,
+        )
+
+        # Create replanning signature if replan is enabled
+        replanning_signature = None
+        if self.replan_enabled:
+            replan_instr = self._build_replanning_instructions(inputs, outputs, rules)
+            replanning_signature = (
+                dspy.Signature({
+                    **self.signature.input_fields,
+                    "original_plan": dspy.InputField(desc="The original plan that is being updated"),
+                    "execution_history": dspy.InputField(desc="History of executed steps and their results"),
+                    "replan_step_result": dspy.InputField(desc="Result of the step that triggered replanning")
+                }, replan_instr)
+                .append("updated_plan", dspy.OutputField(desc="Updated plan incorporating new information"), type_=str)
+            )
+
+        return planning_signature, execution_signature, extraction_signature, replanning_signature
 
     def _format_execution_history(self, history: List[Dict[str, Any]]) -> str:
         """Format execution history for display."""
@@ -276,16 +295,24 @@ class PlanAndExecute(Module):
         """Execute the plan-and-execute workflow."""
         max_plan_steps = input_args.pop("max_plan_steps", self.max_plan_steps)
         max_retries = input_args.pop("max_retries", self.max_retries)
+        rules = input_args.pop("rules", "")
+
+        # Create signatures dynamically with rules (empty string if no rules provided)
+        planning_signature, execution_signature, extraction_signature, replanning_signature = self._create_signatures_with_rules(rules)
+        planner = dspy.ChainOfThought(planning_signature)
+        executor = dspy.ChainOfThought(execution_signature)
+        extractor = dspy.ChainOfThought(extraction_signature)
+        replanner = dspy.ChainOfThought(replanning_signature) if self.replan_enabled and replanning_signature else None
 
         # Phase 1: Planning
         try:
-            plan_result = self._call_with_potential_context_truncation(self.planner, {}, **input_args)
+            plan_result = self._call_with_potential_context_truncation(planner, {}, **input_args)
             plan = plan_result.plan
         except Exception as err:
             logger.error(f"Planning phase failed: {_fmt_exc(err)}")
             # Fallback to direct answer if planning fails
             result = self._call_with_potential_context_truncation(
-                self.extractor, 
+                extractor, 
                 {"plan": "Lập kế hoạch thất bại", "execution_history": "Không thực hiện gì"},
                 **input_args
             )
@@ -301,7 +328,7 @@ class PlanAndExecute(Module):
         steps = self._parse_plan_steps(plan)
         if not steps:
             result = self._call_with_potential_context_truncation(
-                self.extractor,
+                extractor,
                 {"plan": plan, "execution_history": "Không có bước hợp lệ nào trong kế hoạch"},
                 **input_args
             )
@@ -331,7 +358,7 @@ class PlanAndExecute(Module):
                 try:
                     # Execute current step
                     exec_result = self._call_with_potential_context_truncation(
-                        self.executor,
+                        executor,
                         {
                             "step_id": step_id,
                             "step_description": step_description,
@@ -377,7 +404,7 @@ class PlanAndExecute(Module):
                         logger.info(f"Step {step_id} marked for replanning, updating plan...")
                         try:
                             replan_result = self._call_with_potential_context_truncation(
-                                self.replanner,
+                                replanner,
                                 {
                                     "original_plan": json.dumps(current_steps, indent=2),
                                     "execution_history": self._format_execution_history(execution_history),
@@ -421,7 +448,7 @@ class PlanAndExecute(Module):
         # Phase 3: Extract final answer
         try:
             final_result = self._call_with_potential_context_truncation(
-                self.extractor,
+                extractor,
                 {
                     "plan": plan,
                     "execution_history": self._format_execution_history(execution_history)
