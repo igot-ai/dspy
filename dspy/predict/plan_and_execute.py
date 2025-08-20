@@ -1,11 +1,12 @@
 import json
 import logging
-from typing import TYPE_CHECKING, Any, Callable, List, Dict
+from typing import TYPE_CHECKING, Any, Callable, List, Dict, Optional
 
 from litellm import ContextWindowExceededError
 
 import dspy
 from dspy.adapters.types.tool import Tool
+from dspy.clients.base_lm import BaseLM
 from dspy.primitives.module import Module
 from dspy.signatures.signature import ensure_signature
 
@@ -16,7 +17,14 @@ if TYPE_CHECKING:
 
 
 class PlanAndExecute(Module):
-    def __init__(self, signature: type["Signature"], tools: list[Callable], max_plan_steps: int = 10, max_retries: int = 3, replan_enabled: bool = True):
+    def __init__(
+            self, 
+            signature: type["Signature"], 
+            tools: list[Callable], 
+            max_plan_steps: int = 10, 
+            max_retries: int = 3, 
+            planning_lm: Optional[BaseLM] = None, 
+        ):
         """
         PlanAndExecute is a framework for building agents that separate planning from execution.
         The agent first creates a comprehensive plan to accomplish the task, then executes each
@@ -28,7 +36,7 @@ class PlanAndExecute(Module):
             tools (list[Callable]): A list of functions, callable objects, or `dspy.Tool` instances.
             max_plan_steps (Optional[int]): The maximum number of steps in the plan. Defaults to 10.
             max_retries (Optional[int]): The maximum number of retries for failed steps. Defaults to 3.
-            replan_enabled (Optional[bool]): Whether to enable dynamic replanning. Defaults to True.
+            planning_lm (Optional[BaseLM]): Separate language model to use for planning & replanning phase
 
         Example:
 
@@ -42,7 +50,15 @@ class PlanAndExecute(Module):
         plan_execute = dspy.PlanAndExecute(
             signature="request->response", 
             tools=[list_files, get_file_details],
-            replan_enabled=True
+        )
+        
+        # Example with different models for planning and replanning:
+        planning_model = dspy.LM('openai/gpt-4o')  # Use GPT-4 for planning
+        
+        plan_execute_with_models = dspy.PlanAndExecute(
+            signature="request->response",
+            tools=[list_files, get_file_details],
+            planning_lm=planning_model,
         )
         
         # Example with replanning - the plan will be updated after step 1
@@ -69,8 +85,8 @@ class PlanAndExecute(Module):
         self.signature = signature = ensure_signature(signature)
         self.max_plan_steps = max_plan_steps
         self.max_retries = max_retries
-        self.replan_enabled = replan_enabled
-
+        self.planning_lm = planning_lm
+        
         # Convert tools to Tool objects and create a dictionary for lookup
         tools = [t if isinstance(t, Tool) else Tool(t) for t in tools]
         self.tools = {tool.name: tool for tool in tools}
@@ -87,8 +103,7 @@ class PlanAndExecute(Module):
         self.planner = dspy.ChainOfThought(self.planning_signature)
         self.executor = dspy.ChainOfThought(self.execution_signature)
         self.extractor = dspy.ChainOfThought(self.extraction_signature)
-        self.replanner = dspy.ChainOfThought(self.replanning_signature) if self.replan_enabled and self.replanning_signature else None
-
+        self.replanner = dspy.ChainOfThought(self.replanning_signature)
 
 
     def _build_planning_instructions(self, inputs: str, outputs: str) -> str:
@@ -190,6 +205,7 @@ class PlanAndExecute(Module):
         plan_instr = self._build_planning_instructions(inputs, outputs)
         exec_instr = self._build_execution_instructions(outputs)
         extract_instr = self._build_extraction_instructions(inputs, outputs)
+        replan_instr = self._build_replanning_instructions(inputs, outputs)
 
         # Create signatures for each phase
         planning_signature = (
@@ -218,19 +234,15 @@ class PlanAndExecute(Module):
             extract_instr,
         )
 
-        # Create replanning signature if replan is enabled
-        replanning_signature = None
-        if self.replan_enabled:
-            replan_instr = self._build_replanning_instructions(inputs, outputs)
-            replanning_signature = (
-                dspy.Signature({
-                    **self.signature.input_fields,
-                    "original_plan": dspy.InputField(desc="The original plan that is being updated"),
-                    "execution_history": dspy.InputField(desc="History of executed steps and their results"),
-                    "replan_step_result": dspy.InputField(desc="Result of the step that triggered replanning")
-                }, replan_instr)
-                .append("updated_plan", dspy.OutputField(desc="Updated plan incorporating new information"), type_=str)
-            )
+        replanning_signature = (
+            dspy.Signature({
+                **self.signature.input_fields,
+                "original_plan": dspy.InputField(desc="The original plan that is being updated"),
+                "execution_history": dspy.InputField(desc="History of executed steps and their results"),
+                "replan_step_result": dspy.InputField(desc="Result of the step that triggered replanning")
+            }, replan_instr)
+            .append("updated_plan", dspy.OutputField(desc="Updated plan incorporating new information"), type_=str)
+        )
 
         return planning_signature, execution_signature, extraction_signature, replanning_signature
 
@@ -287,7 +299,12 @@ class PlanAndExecute(Module):
 
         # Phase 1: Planning
         try:
-            plan_result = self._call_with_potential_context_truncation(self.planner, {"rules": rules}, **input_args)
+            plan_result = self._call_with_potential_context_truncation(
+                module=self.planner, 
+                additional_args={"rules": rules}, 
+                specific_lm=self.planning_lm, 
+                **input_args
+            )
             plan = plan_result.plan
         except Exception as err:
             logger.error(f"Planning phase failed: {_fmt_exc(err)}")
@@ -380,7 +397,7 @@ class PlanAndExecute(Module):
                     })
                     
                     # Check if this step requires replanning
-                    if self.replan_enabled and step.get('replan', False):
+                    if step.get('replan', False):
                         logger.info(f"Step {step_id} marked for replanning, updating plan...")
                         try:
                             replan_result = self._call_with_potential_context_truncation(
@@ -391,6 +408,7 @@ class PlanAndExecute(Module):
                                     "execution_history": self._format_execution_history(execution_history),
                                     "replan_step_result": str(tool_result)
                                 },
+                                specific_lm=self.replanning_lm,
                                 **input_args
                             )
                             
@@ -462,11 +480,15 @@ class PlanAndExecute(Module):
         """Async version of the plan-and-execute workflow."""
         pass # Skip asycn for now
 
-    def _call_with_potential_context_truncation(self, module, additional_args, **input_args):
+    def _call_with_potential_context_truncation(self, module, additional_args, specific_lm=None, **input_args):
         """Call a module with potential context window truncation handling."""
         for _ in range(3):
             try:
-                return module(**input_args, **additional_args)
+                # If specific LM is provided, pass it as lm parameter to the module call
+                if specific_lm:
+                    return module(lm=specific_lm, **input_args, **additional_args)
+                else:
+                    return module(**input_args, **additional_args)
             except ContextWindowExceededError:
                 logger.warning("Context window exceeded, truncating execution history.")
                 if "execution_history" in additional_args:
