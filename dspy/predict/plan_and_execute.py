@@ -408,7 +408,7 @@ class PlanAndExecute(Module):
                                     "execution_history": self._format_execution_history(execution_history),
                                     "replan_step_result": str(tool_result)
                                 },
-                                specific_lm=self.replanning_lm,
+                                specific_lm=self.planning_lm,
                                 **input_args
                             )
                             
