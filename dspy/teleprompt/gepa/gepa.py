@@ -1,3 +1,4 @@
+import inspect
 import logging
 import random
 from dataclasses import dataclass
@@ -260,6 +261,14 @@ class GEPA(Teleprompter):
         # Reproducibility
         seed: int | None = 0,
     ):
+        try:
+            inspect.signature(metric).bind(None, None, None, None, None)
+        except TypeError as e:
+            raise TypeError(
+                "GEPA metric must accept five arguments: (gold, pred, trace, pred_name, pred_trace). "
+                "See https://dspy.ai/api/optimizers/GEPA for details."
+            ) from e
+
         self.metric_fn = metric
 
         # Budget configuration
@@ -455,6 +464,8 @@ class GEPA(Teleprompter):
             wandb_api_key=self.wandb_api_key,
             wandb_init_kwargs=self.wandb_init_kwargs,
             track_best_outputs=self.track_best_outputs,
+            display_progress_bar=True,
+            raise_on_exception=True,
 
             # Reproducibility
             seed=self.seed,
