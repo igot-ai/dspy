@@ -67,8 +67,8 @@ class PlanAndExecute(Module):
         """
         super().__init__()
         self.signature = signature = ensure_signature(signature)
-        self.max_plan_steps = max_plan_steps
-        self.max_retries = max_retries
+        self.max_plan_steps = int(max_plan_steps)  # Ensure integer type for slicing
+        self.max_retries = int(max_retries)  # Ensure integer type for range()
         self.replan_enabled = replan_enabled
 
         # Convert tools to Tool objects and create a dictionary for lookup
